@@ -14,6 +14,9 @@ type azDoCollector struct {
 	AzDoClient        *azdo.AzDoClient
 	ignoreHostedPools bool
 	lastScrape        time.Time
+	refreshMu         sync.Mutex
+	metricsMu         sync.RWMutex
+	cachedMetrics     []prometheus.Metric
 }
 
 func newAzDoCollector(az azdo.AzDoClient, ignoreHostedPools bool) *azDoCollector {
@@ -21,152 +24,86 @@ func newAzDoCollector(az azdo.AzDoClient, ignoreHostedPools bool) *azDoCollector
 }
 
 func (azc *azDoCollector) Describe(ch chan<- *prometheus.Desc) {
-	prometheus.DescribeByCollect(azc, ch)
+	ch <- installedBuildAgentsDesc
+	ch <- installedBuildAgentsDurationDesc
+	ch <- totalJobsDesc
+	ch <- queuedJobsDesc
+	ch <- runningJobsDesc
+	for _, metric := range calculateHistograms(metricsContext{}) {
+		ch <- metric.Desc()
+	}
 }
 
 func (azc *azDoCollector) Collect(publishMetrics chan<- prometheus.Metric) {
+	azc.metricsMu.RLock()
+	metrics := azc.cachedMetrics
+	azc.metricsMu.RUnlock()
 
-	start := time.Now()
-
-	//Get all the pools from AzDo
-	pools, err := azc.AzDoClient.Pools(azc.ignoreHostedPools)
-	if err != nil {
-		log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name, "error": err}).Error(" Scrape Failed. Could not retrive pools.")
-		return
-	}
-	log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name, "poolCount": len(pools)}).Debug("Retrieved pools")
-
-	// Pipeline for scraping and calculating metrics.
-	// Each returns a channel which the next step consumes.
-	// scrapeAgents returns a channel of metricContexts which contains the agents for a pool.
-	// scrapeJobs then consumes this channel and augments the metricContexts with information about the Jobs
-
-	chanAgents, errOccurred := azc.scrapeAgents(pools)
-	chanJobs := azc.scrapeJobs(chanAgents)
-	chanCalculatedMetrics := azc.calculateMetrics(chanJobs)
-	chanBufferedMetrics := azc.bufferMetrics(chanCalculatedMetrics, errOccurred) //Buffers and blocks until the in chan is closed. ErrOccured must be false to write anything to out chan
-
-	// Publish the buffered metrics
-	for metric := range chanBufferedMetrics {
+	for _, metric := range metrics {
 		publishMetrics <- metric
 	}
-
-	log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name}).Info("Scraped agents")
-
-	// Time it has take to run this scrape
-	publishMetrics <- prometheus.MustNewConstMetric(
-		installedBuildAgentsDurationDesc,
-		prometheus.GaugeValue,
-		time.Since(start).Seconds(),
-	)
-
-	azc.lastScrape = time.Now()
 }
 
-func (azc *azDoCollector) scrapeAgents(pools []azdo.Pool) (<-chan metricsContext, bool) {
-	errOccurred := false
-	metricsContextChanOut := make(chan metricsContext) //Channel to pass metricsContext along to for next part of the pipeline
-	var wg sync.WaitGroup
+func (azc *azDoCollector) startRefresh(interval time.Duration) {
+	if interval <= 0 {
+		interval = refreshIntervalDefault
+	}
+	go func() {
+		azc.refresh()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			azc.refresh()
+		}
+	}()
+}
 
-	// For each pool, spin up a go routine, retrive the agents for that pool and pass both the pool and agents along into the channel for the next step
-	for _, pool := range pools {
-		wg.Add(1)
-		go func(p azdo.Pool) {
-			agents, err := azc.AzDoClient.Agents(p.ID) //Get all Agents for pool
-			if err != nil {
-				errOccurred = true
-				log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name, "poolId": p.ID, "err": err}).Error("Failed to retrieve agents for pool")
-			}
-			log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name, "poolId": p.ID, "agentsInPoolCount": len(agents)}).Debug("Retrieved agents for pool")
-			metricsContextChanOut <- metricsContext{pool: p, agents: agents}
-			wg.Done()
-		}(pool)
+func (azc *azDoCollector) refresh() {
+	azc.refreshMu.Lock()
+	defer azc.refreshMu.Unlock()
+
+	start := time.Now()
+	pools, err := azc.AzDoClient.Pools(azc.ignoreHostedPools)
+	if err != nil {
+		log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name, "error": err}).Error("Refresh failed to retrieve pools")
+		return
 	}
 
-	go func() {
-		wg.Wait()
-		close(metricsContextChanOut)
-	}()
-
-	return metricsContextChanOut, errOccurred
-}
-
-func (azc *azDoCollector) scrapeJobs(metricsContextChanIn <-chan metricsContext) <-chan metricsContext {
-	metricsContextChanOut := make(chan metricsContext)
-
-	go func() {
-		for metricsContext := range metricsContextChanIn {
-
-			finishedJobs, currentJobs, err := azc.AzDoClient.JobsAfter(metricsContext.pool.ID, azc.lastScrape)
-			if err != nil {
-				log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name, "poolId": metricsContext.pool.ID, "err": err}).Error("Failed to retrieve queued jobs for pool")
-			}
-			log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name, "poolId": metricsContext.pool.ID, "currentJobsInPoolCount": len(currentJobs)}).Debug("Retrieved current jobs for pools")
-
-			metricsContext.currentJobs = currentJobs   // Augment the metrics context with the current jobs for this pool
-			metricsContext.finishedJobs = finishedJobs // Augment the metrics context with the finished jobs for this pool(since the last scrape)
-
-			metricsContextChanOut <- metricsContext
-		}
-		close(metricsContextChanOut)
-	}()
-
-	return metricsContextChanOut
-}
-
-func (azc *azDoCollector) calculateMetrics(metricsContextChanIn <-chan metricsContext) <-chan prometheus.Metric {
-	metrics := make(chan prometheus.Metric)
-
-	go func() {
-		for metricsContext := range metricsContextChanIn {
-
-			agentMetrics := calculateAgentMetrics(metricsContext)
-			for _, agentMetric := range agentMetrics {
-				metrics <- agentMetric
-			}
-
-			jobMetrics := calculateJobMetrics(metricsContext)
-			for _, jobMetric := range jobMetrics {
-				metrics <- jobMetric
-			}
-
-		}
-		close(metrics)
-
-	}()
-	return metrics
-}
-
-func (azc *azDoCollector) bufferMetrics(metricsIn <-chan prometheus.Metric, errOccurred bool) <-chan prometheus.Metric {
-	metricsOut := make(chan prometheus.Metric)
-
-	go func() {
-		bufferedMetrics := []prometheus.Metric{}
-
-		// Will not exit range until 'metricsIn' chan is closed earlier in the pipeline thus blocking exposing the metrics
-		// If there are any errors then gives chance for them not to published
-		for metric := range metricsIn {
-			bufferedMetrics = append(bufferedMetrics, metric)
-		}
-
-		if errOccurred {
-			log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name}).Error("Metrics not exposed due to previous error")
-			close(metricsOut)
+	metrics := []prometheus.Metric{}
+	for _, pool := range pools {
+		agents, err := azc.AzDoClient.Agents(pool.ID)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"serverName": azc.AzDoClient.Name, "poolId": pool.ID, "error": err,
+			}).Error("Refresh failed to retrieve agents")
 			return
 		}
 
-		log.WithFields(log.Fields{"serverName": azc.AzDoClient.Name}).Info("No errors detected collecting metric. Exposing metrics")
-		for _, metric := range bufferedMetrics {
-			metricsOut <- metric
+		finishedJobs, currentJobs, err := azc.AzDoClient.JobsAfter(pool.ID, azc.lastScrape)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"serverName": azc.AzDoClient.Name, "poolId": pool.ID, "error": err,
+			}).Error("Refresh failed to retrieve jobs")
+			return
 		}
 
-		close(metricsOut)
+		metricContext := metricsContext{pool: pool, agents: agents, currentJobs: currentJobs, finishedJobs: finishedJobs}
+		metrics = append(metrics, calculateAgentMetrics(metricContext)...)
+		metrics = append(metrics, calculateJobMetrics(metricContext)...)
+	}
 
-	}()
-	return metricsOut
+	metrics = append(metrics, prometheus.MustNewConstMetric(
+		installedBuildAgentsDurationDesc,
+		prometheus.GaugeValue,
+		time.Since(start).Seconds(),
+	))
+	azc.metricsMu.Lock()
+	azc.cachedMetrics = metrics
+	azc.metricsMu.Unlock()
+	azc.lastScrape = start
+	log.WithField("serverName", azc.AzDoClient.Name).Info("Refreshed agents")
 }
 
-// Contains all the information needed to calculate the metrics
 type metricsContext struct {
 	pool         azdo.Pool
 	agents       []azdo.Agent

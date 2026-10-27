@@ -118,6 +118,13 @@ func main() {
 		configLogger.WithField("endpoint", c.Exporter.Endpoint).Debug("Metrics will be exposed on endpoint specified")
 	}
 
+	if c.Exporter.RefreshInterval <= 0 {
+		c.Exporter.RefreshInterval = refreshIntervalDefault
+		configLogger.WithField("refreshInterval", c.Exporter.RefreshInterval).Debug("Using default refresh interval")
+	} else {
+		configLogger.WithField("refreshInterval", c.Exporter.RefreshInterval).Debug("Using refresh interval specified")
+	}
+
 	if configValid == false {
 		configLogger.Fatal("Errors found within config")
 		return
@@ -139,10 +146,11 @@ func main() {
 		log.WithFields(log.Fields{"server": server.Name, "serverAddress": server.Address}).Info("Metrics collector created")
 	}
 
-	// Add each azdoCollector to the register so they get called when Prometheus scrapes.
+	// Register cached collectors and start their independent refresh loops.
 	var reg = prometheus.NewRegistry()
 	for _, tc := range azDoCollectors {
 		prometheus.WrapRegistererWith(prometheus.Labels{"name": tc.AzDoClient.Name}, reg).MustRegister(tc)
+		tc.startRefresh(c.Exporter.RefreshInterval)
 	}
 
 	http.Handle(c.Exporter.Endpoint, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))

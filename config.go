@@ -2,13 +2,15 @@ package main
 
 import (
 	"net/url"
+	"time"
 
 	"./azdo"
 )
 
 var (
-	portDefault     = 8080
-	endpointDefault = "/metrics"
+	portDefault            = 8080
+	endpointDefault        = "/metrics"
+	refreshIntervalDefault = 5 * time.Minute
 )
 
 type config struct {
@@ -18,8 +20,9 @@ type config struct {
 }
 
 type exporter struct {
-	Port     int
-	Endpoint string
+	Port            int
+	Endpoint        string
+	RefreshInterval time.Duration
 }
 
 type proxy struct {

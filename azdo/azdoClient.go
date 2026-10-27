@@ -195,6 +195,9 @@ func (az *AzDoClient) makeHTTPRequest(req *http.Request) ([]byte, error) {
 		return []byte{}, fmt.Errorf("Call to %v failed: %v", req.URL, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("Call to %v returned HTTP status %v", req.URL, resp.StatusCode)
+	}
 	log.WithFields(log.Fields{"serverName": az.Name, "URL": req.URL, "StatusCode": resp.StatusCode}).Trace("Made HTTP request")
 
 	// Read body of response

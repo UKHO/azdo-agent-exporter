@@ -61,6 +61,25 @@ Access tokens for Azure DevOps should be provided using environment variables. T
 
 The default port and url where the metrics are exposed is `:8080/metrics`
 
+### Data Refresh
+
+Azure DevOps data is refreshed in the background, independently of requests to the metrics endpoint.
+Each server refreshes immediately at startup and then on the configured interval. Prometheus requests
+only read the most recent complete cached snapshot and do not call Azure DevOps or wait for an active refresh.
+
+```toml
+[exporter]
+  refreshInterval = "5m"
+```
+
+`refreshInterval` is a duration string with a unit, such as `"30s"`, `"5m"`, or `"1h"`, not a bare number.
+It defaults to five minutes when omitted, zero, or negative. This setting does not change Prometheus's own scrape interval.
+Refreshes for a server do not overlap.
+
+Before the first successful refresh, the endpoint exposes no Azure DevOps metrics for that server.
+If a refresh fails, the previous successful snapshot continues to be served until a later refresh succeeds.
+The scrape-duration metric records the duration of the last successful background refresh.
+
 ### Basic Configuration
 
 ```toml
@@ -102,6 +121,7 @@ The default port and url where the metrics are exposed is `:8080/metrics`
 [exporter]
     port = 9595
     endpoint = "/azdometrics"
+  refreshInterval = "5m"
 
 [servers]
     [servers.azuredevops]
@@ -120,7 +140,8 @@ The default port and url where the metrics are exposed is `:8080/metrics`
 
 ## Tips
 
-Set the Prometheus scrape timeout to be larger than 10 seconds as scrapes can sometimes be longer 10s.
+Choose `refreshInterval` according to how fresh the agent and queue data needs to be.
+Scraping Prometheus metrics more often does not trigger additional Azure DevOps requests.
 
 ## Metrics Exposed
 

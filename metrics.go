@@ -45,36 +45,33 @@ var (
 
 func calculateHistograms(metricContext metricsContext) []prometheus.Metric {
 
-	totalTimes := prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:        "tfs_pool_job_total_length_secs",
-		Help:        "Total length of job duration for pool",
-		Buckets:     calculateBuckets(),
-		ConstLabels: map[string]string{"pool": metricContext.pool.Name},
-	})
+	totalTimes := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "tfs_pool_job_total_length_secs",
+		Help:    "Total length of job duration for pool",
+		Buckets: calculateBuckets(),
+	}, []string{"pool"}).WithLabelValues(metricContext.pool.Name).(prometheus.Histogram)
 
 	for _, job := range metricContext.finishedJobs {
 		totalTime := job.FinishTime.Sub(job.QueueTime)
 		totalTimes.Observe(totalTime.Seconds())
 	}
 
-	queueTimes := prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:        "tfs_pool_job_queue_length_secs",
-		Help:        "Total length of queue duration for pool",
-		Buckets:     prometheus.ExponentialBuckets(1, 2, 10), // 10 buckets, starting at one, doubling
-		ConstLabels: map[string]string{"pool": metricContext.pool.Name},
-	})
+	queueTimes := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "tfs_pool_job_queue_length_secs",
+		Help:    "Total length of queue duration for pool",
+		Buckets: prometheus.ExponentialBuckets(1, 2, 10), // 10 buckets, starting at one, doubling
+	}, []string{"pool"}).WithLabelValues(metricContext.pool.Name).(prometheus.Histogram)
 
 	for _, job := range metricContext.finishedJobs {
 		queueTime := job.ReceiveTime.Sub(job.QueueTime) // Time received by the agent - Time queued by the user
 		queueTimes.Observe(queueTime.Seconds())
 	}
 
-	jobTimes := prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:        "tfs_pool_job_running_length_secs",
-		Help:        "Total length of queue duration for pool",
-		Buckets:     calculateBuckets(),
-		ConstLabels: map[string]string{"pool": metricContext.pool.Name},
-	})
+	jobTimes := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "tfs_pool_job_running_length_secs",
+		Help:    "Total length of queue duration for pool",
+		Buckets: calculateBuckets(),
+	}, []string{"pool"}).WithLabelValues(metricContext.pool.Name).(prometheus.Histogram)
 
 	for _, job := range metricContext.finishedJobs {
 		jobTime := job.FinishTime.Sub(job.ReceiveTime)
