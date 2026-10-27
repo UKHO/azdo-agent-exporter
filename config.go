@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"time"
 
-	"./azdo"
+	"ukho.gov.uk/azdo-agent-exporter/azdo"
 )
 
 var (

@@ -1,10 +1,12 @@
-FROM golang:1.14 AS builder
+FROM golang:1.26 AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN go get -d -v .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o azdoexporter .
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
-COPY --from=builder /go/azdoexporter .
+COPY --from=builder /src/azdoexporter .
 EXPOSE 8080
 ENTRYPOINT ["./azdoexporter"]

@@ -11,7 +11,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"./azdo"
+	"ukho.gov.uk/azdo-agent-exporter/azdo"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
